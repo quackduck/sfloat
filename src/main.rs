@@ -121,19 +121,16 @@ impl Float {
 
         let mut exponent = self.get_exponent() + other.get_exponent();
 
-        // add implicit leading 1s
-        // let mut mantissa_full = u128::from(self.get_mantissa() | (1 << 52)) * u128::from(other.get_mantissa() | (1 << 52));
-
         let mut mantissa_full = {
             let a_full = if self.get_exponent() == -1023 { // subnormal
                 // todo: better way to handle subnormals?
                 exponent += 1; // adjust exponent for subnormal
                 self.get_mantissa()
             } else {
-                self.get_mantissa() | (1 << 52)
+                self.get_mantissa() | (1 << 52) // implicit leading 1
             };
             let b_full = if other.get_exponent() == -1023 { // subnormal
-                exponent += 1; // adjust exponent for subnormal
+                exponent += 1;
                 other.get_mantissa()
             } else {
                 other.get_mantissa() | (1 << 52)
@@ -150,18 +147,17 @@ impl Float {
             mantissa_full >>= 1;
         }
 
-        // move mantissa_full up until 105th bit is set
-        while mantissa_full >> 104 == 0 && mantissa_full != 0 {
-            // println!("Normalizing mantissa, shifting left");
-            mantissa_full <<= 1;
-            exponent -= 1;
-        } // now either 105th bit is set or mantissa_full is zero. we could exit early here if mantissa_full is zero...
+        // todo: handle upper case by using leading zeros too.
+        let leading_zeros = mantissa_full.leading_zeros();
+        let wanted_leading_zeros = 128 - 105; // we want the 105th bit to be set, so we want 128-105 leading zeros
+        let shift_amt = leading_zeros - wanted_leading_zeros; // not negative because we handled that case above
+        mantissa_full <<= shift_amt; // fairly sure this is only needed for subnormals
+        exponent -= shift_amt as i16;
 
         let shift_and_round = |mantissa_full: u128, shift: u32| -> u64 {
             let mantissa = mantissa_full >> shift; // shift down to get 53 bits (including implicit leading 1)
             let mantissa_lower = mantissa_full & ((1 << shift) - 1);
             if mantissa_lower == (1 << (shift - 1)) { // tie, so round to even case.
-                // println!("TIE!");
                 if mantissa & 1 == 1 {
                     (mantissa + 1) as u64 // round up to make even
                 } else {
@@ -183,13 +179,12 @@ impl Float {
 
         if exponent <= -1023 {
             // can we create a subnormal number?
-            if exponent < -1075 {
+            if exponent < -1075 { // min subnormal is 2^-52 * 2^-1022 = 2^-1074. we still allow exponent -1075 because we might round up to that value
                 // underflow to zero
                 return Float::from_bits((sign as u64) << 63); // zero
             }
-            // subnormal
-            shift += (-1023 + 1 - exponent) as u32;
-            exponent = -1023;
+            shift += (-1023 + 1 - exponent) as u32; // correct by induction: if exponent is -1023, we want to shift by 1 extra since -1022 is the exponent this subnormal will be interpreted as having. if exponent is -1024 we want to shift by 2 extra, etc.
+            exponent = -1023; // mark as subnormal
         }
         // from parts selects the lower 52 bits of the mantissa for us.
         Float::from_parts(sign, exponent, shift_and_round(mantissa_full, shift) as u64)
@@ -245,13 +240,13 @@ fn mult_stress_test() {
 
 
 fn main() {
-    // let a = float::new(0.01);
-    let a = Float::new(-1.02735137937997933477e+00);
+    let a = Float::new(0.00);
+    // let a = Float::new(-1.02735137937997933477e+00);
     println!("{:?}", a.to_f64());
     a.print_parts();
     a.print_bits();
-    // let b = float::new(-0.03);
-    let b = Float::new(-1.02735137937997933477e+00);
+    let b = Float::new(0.00);
+    // let b = Float::new(-1.02735137937997933477e+00);
     println!("{:?}", b.to_f64());
     b.print_parts();
     b.print_bits();
