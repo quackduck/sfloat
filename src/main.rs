@@ -92,11 +92,11 @@ impl Float {
 
 
     fn multiply(&self, other: &Float) -> Float {
-        if self.is_nan() {
-            return Float::from_bits(self.bits | 1 << 51) // set 52nd bit to indicate qNaN
-        }
         if other.is_nan() {
-            return Float::from_bits(other.bits | 1 << 51)
+            return Float::from_bits(other.bits | 1 << 51) // set 52nd bit to indicate qNaN
+        }
+        if self.is_nan() {
+            return Float::from_bits(self.bits | 1 << 51)
         }
 
         let sign = self.get_sign() ^ other.get_sign();
@@ -130,7 +130,7 @@ impl Float {
             u128::from(a_full) * u128::from(b_full)
         };
 
-        println!("Mantissa full: {:0106b}", mantissa_full);
+        // println!("Mantissa full: {:0106b}", mantissa_full);
 
         if mantissa_full >> 105 != 0 { // is 106th bit set?
             // println!("Normalizing mantissa, shifting right");
@@ -186,7 +186,7 @@ impl Float {
 
         if exponent <= -1023 {
             // can we create a subnormal number?
-            if exponent < -1074 {
+            if exponent < -1075 {
                 // underflow to zero
                 return Float::from_bits((sign as u64) << 63); // zero
             }
@@ -226,6 +226,7 @@ fn mult_check_print(a: Float, b: Float, print: bool) {
         b.print_parts();
         result.print_parts();
         Float::new(expected).print_parts();
+        panic!("Test failed");
     } else if print {
         println!("Match!");
         println!("x: {}, y: {}", a.to_f64(), b.to_f64());
@@ -237,11 +238,12 @@ fn mult_check_print(a: Float, b: Float, print: bool) {
 fn mult_stress_test() {
     use rand::Rng;
     let mut rng = rand::rng();
-    for _ in 0..1_000_000 {
+    for _ in 0..10_000_000 {
         let fx = Float::from_bits(rng.random());
         let fy = Float::from_bits(rng.random());
         mult_check_print(fx, fy, false);
     }
+    println!("Stress test passed!");
 }
 
 
