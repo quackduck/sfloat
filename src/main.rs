@@ -92,11 +92,22 @@ impl Float {
 
 
     fn multiply(&self, other: &Float) -> Float {
-        if other.is_nan() {
-            return Float::from_bits(other.bits | 1 << 51) // set 52nd bit to indicate qNaN
-        }
-        if self.is_nan() {
-            return Float::from_bits(self.bits | 1 << 51)
+        // this nan logic is not super important but matches apple's cpu behavior
+        // the rule is that signaling nans take precedence over quiet nans,
+        // that if both are the same type the first operand takes precedence,
+        // and that if one is a nan and the other is not, the nan is returned.
+        let self_is_nan = self.is_nan();
+        let other_is_nan = other.is_nan();
+        if self_is_nan || other_is_nan {
+            let chosen_nan = if other_is_nan && (other.get_mantissa() >> 51) == 0 && 
+                                !(self_is_nan && (self.get_mantissa() >> 51) == 0) { // other is signaling nan and self is not signaling nan
+                other.bits
+            } else if self_is_nan { 
+                self.bits 
+            } else { 
+                other.bits 
+            };
+            return Float::from_bits(chosen_nan | 1 << 51); // quiet nan
         }
 
         let sign = self.get_sign() ^ other.get_sign();
@@ -145,20 +156,6 @@ impl Float {
             mantissa_full <<= 1;
             exponent -= 1;
         } // now either 105th bit is set or mantissa_full is zero. we could exit early here if mantissa_full is zero...
-
-        // let mut mantissa = mantissa_full >> 52; // shift down to get 53 bits (including implicit leading 1)
-        // {
-        //     let mantissa_lower52 = mantissa_full & ((1 << 52) - 1);
-        //     if mantissa_lower52 == (1 << 51) { // tie, so round to even case.
-        //         println!("TIE!");
-        //         if mantissa & 1 == 1 {
-        //             mantissa += 1; // round up to make even
-        //         }
-        //         // else truncate, so do nothing
-        //     } else if mantissa_lower52 > (1 << 51) {
-        //         mantissa += 1; // round up
-        //     } // else truncate, so do nothing
-        // }
 
         let shift_and_round = |mantissa_full: u128, shift: u32| -> u64 {
             let mantissa = mantissa_full >> shift; // shift down to get 53 bits (including implicit leading 1)
