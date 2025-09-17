@@ -130,7 +130,7 @@ impl Float {
             u128::from(a_full) * u128::from(b_full)
         };
 
-        // println!("Mantissa full: {:0106b}", mantissa_full);
+        println!("Mantissa full: {:0106b}", mantissa_full);
 
         if mantissa_full >> 105 != 0 { // is 106th bit set?
             // println!("Normalizing mantissa, shifting right");
@@ -146,19 +146,43 @@ impl Float {
             exponent -= 1;
         } // now either 105th bit is set or mantissa_full is zero. we could exit early here if mantissa_full is zero...
 
-        let mut mantissa = mantissa_full >> 52; // shift down to get 53 bits (including implicit leading 1)
-        {
-            let mantissa_lower52 = mantissa_full & ((1 << 52) - 1);
-            if mantissa_lower52 == (1 << 51) { // tie, so round to even case.
-                println!("TIE!");
+        // let mut mantissa = mantissa_full >> 52; // shift down to get 53 bits (including implicit leading 1)
+        // {
+        //     let mantissa_lower52 = mantissa_full & ((1 << 52) - 1);
+        //     if mantissa_lower52 == (1 << 51) { // tie, so round to even case.
+        //         println!("TIE!");
+        //         if mantissa & 1 == 1 {
+        //             mantissa += 1; // round up to make even
+        //         }
+        //         // else truncate, so do nothing
+        //     } else if mantissa_lower52 > (1 << 51) {
+        //         mantissa += 1; // round up
+        //     } // else truncate, so do nothing
+        // }
+
+        let shift_and_round = |mantissa_full: u128, shift: u32| -> u64 {
+            let mantissa = mantissa_full >> shift; // shift down to get 53 bits (including implicit leading 1)
+            let mantissa_lower = mantissa_full & ((1 << shift) - 1);
+            if mantissa_lower == (1 << (shift - 1)) { // tie, so round to even case.
+                // println!("TIE!");
                 if mantissa & 1 == 1 {
-                    mantissa += 1; // round up to make even
+                    (mantissa + 1) as u64 // round up to make even
+                } else {
+                    mantissa as u64 // truncate, so do nothing
                 }
-                // else truncate, so do nothing
-            } else if mantissa_lower52 > (1 << 51) {
-                mantissa += 1; // round up
-            } // else truncate, so do nothing
+            } else if mantissa_lower > (1 << (shift - 1)) {
+                (mantissa + 1) as u64 // round up
+            } else {
+                mantissa as u64 // truncate, so do nothing
+            }
+        };
+
+        if exponent >= 1024 {
+            // overflow to infinity
+            return Float::from_bits((sign as u64) << 63 | (0x7FF << 52)); // infinity
         }
+
+        let mut shift = 52; // we want to shift right by 52 to get 53 bits (including implicit leading 1). another way to think of this is that when we multiplied the mantissas we did an implicit mult by 2^52.
 
         if exponent <= -1023 {
             // can we create a subnormal number?
@@ -167,17 +191,11 @@ impl Float {
                 return Float::from_bits((sign as u64) << 63); // zero
             }
             // subnormal
-            let shift = (-1023 + 1 - exponent) as u32; // how much to shift right to make exponent -1023
-            mantissa >>= shift; // todo: handle rounding here
+            shift += (-1023 + 1 - exponent) as u32;
             exponent = -1023;
-            return Float::from_parts(sign, exponent, mantissa as u64);
         }
-        if exponent >= 1024 {
-            // overflow to infinity
-            return Float::from_bits((sign as u64) << 63 | (0x7FF << 52)); // infinity
-        }
-
-        Float::from_parts(sign, exponent, mantissa as u64)
+        // from parts selects the lower 52 bits of the mantissa for us.
+        Float::from_parts(sign, exponent, shift_and_round(mantissa_full, shift) as u64)
     }
 
     fn print_bits(&self) {
