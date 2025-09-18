@@ -1,4 +1,3 @@
-
 #[derive(Debug)]
 struct Float {
     bits: u64,
@@ -10,7 +9,9 @@ impl Float {
     }
 
     fn new(value: f64) -> Self {
-        Float { bits: value.to_bits() }
+        Float {
+            bits: value.to_bits(),
+        }
     }
 
     fn to_f64(&self) -> f64 {
@@ -22,9 +23,9 @@ impl Float {
     }
 
     fn get_exponent(&self) -> i16 {
-        let exp_bits = ((self.bits >> 52) & ((1<<11)-1)) as i16;
+        let exp_bits = ((self.bits >> 52) & ((1 << 11) - 1)) as i16;
         exp_bits - 1023 // Subtracting the bias
-        // exp_bits
+                        // exp_bits
     }
 
     fn get_mantissa(&self) -> u64 {
@@ -35,7 +36,7 @@ impl Float {
         self.bits ^= 1 << 63; // flip the sign bit by XORing because 1^0=1 and 1^1=0
     }
 
-    // thank you william kahan
+    // thank you william kahan todo: consider negative numbers
     fn less_than(&self, other: &Float) -> bool {
         self.bits < other.bits
     }
@@ -49,7 +50,7 @@ impl Float {
     fn from_parts(sign: bool, exponent: i16, mantissa: u64) -> Self {
         Float {
             bits: (
-                (sign as u64) << 63) | 
+                (sign as u64) << 63) |
                 ((((exponent + 1023) as u64) & ((1 << 11)-1)) << 52) | // select lower 11 bits of exponent and shift
                 (mantissa & ((1 << 52) - 1) // select lower 52 bits of mantissa
             ),
@@ -90,7 +91,6 @@ impl Float {
     //     float::from_bits(0x0000000000000001) // smallest subnormal number
     // }
 
-
     fn multiply(&self, other: &Float) -> Float {
         // this nan logic is not super important but matches apple's cpu behavior
         // the rule is that signaling nans take precedence over quiet nans,
@@ -99,22 +99,25 @@ impl Float {
         let self_is_nan = self.is_nan();
         let other_is_nan = other.is_nan();
         if self_is_nan || other_is_nan {
-            let chosen_nan = if other_is_nan && (other.get_mantissa() >> 51) == 0 && 
-                                !(self_is_nan && (self.get_mantissa() >> 51) == 0) { // other is signaling nan and self is not signaling nan
+            let chosen_nan = if other_is_nan
+                && (other.get_mantissa() >> 51) == 0
+                && !(self_is_nan && (self.get_mantissa() >> 51) == 0)
+            {
+                // other is signaling nan and self is not signaling nan
                 other.bits
-            } else if self_is_nan { 
-                self.bits 
-            } else { 
-                other.bits 
+            } else if self_is_nan {
+                self.bits
+            } else {
+                other.bits
             };
             return Float::from_bits(chosen_nan | 1 << 51); // quiet nan
         }
 
-        let sign = self.get_sign() ^ other.get_sign();
+        let sign = self.get_sign() ^ other.get_sign(); // same sign means pos, else neg
 
         if self.is_infinity() || other.is_infinity() {
             if self.is_zero() || other.is_zero() {
-                return Float::nan();
+                return Float::nan(); // infinity * 0 = nan
             }
             return Float::infinity(sign);
         }
@@ -122,51 +125,52 @@ impl Float {
         let mut exponent = self.get_exponent() + other.get_exponent();
 
         let mut mantissa_full = {
-            let a_full = if self.get_exponent() == -1023 { // subnormal
-                // todo: better way to handle subnormals?
-                exponent += 1; // adjust exponent for subnormal
-                self.get_mantissa()
-            } else {
-                self.get_mantissa() | (1 << 52) // implicit leading 1
+            // mutable because closure borrows exponent mutably
+            let mut get_full_mantissa = |f: &Float| -> u64 {
+                if f.get_exponent() == -1023 {
+                    // subnormal
+                    exponent += 1; // adjust exponent for subnormal (interpreted as -1022)
+                    f.get_mantissa()
+                } else {
+                    f.get_mantissa() | (1 << 52) // implicit leading 1
+                }
             };
-            let b_full = if other.get_exponent() == -1023 { // subnormal
-                exponent += 1;
-                other.get_mantissa()
-            } else {
-                other.get_mantissa() | (1 << 52)
-            };
-            u128::from(a_full) * u128::from(b_full)
+            u128::from(get_full_mantissa(self)) * u128::from(get_full_mantissa(other))
+            // 53 + 53 = 106 bits
         };
+
+        // todo: consider approach where subnormals are normalized first.
 
         // println!("Mantissa full: {:0106b}", mantissa_full);
 
-        if mantissa_full >> 105 != 0 { // is 106th bit set?
+        // if-else block normalizes mantissa_full so that the 105th bit is set.
+        // why bit 105? because we're going to shift down by 52 and so the implicit 1 will be correctly at bit 53.
+        if mantissa_full >> 105 != 0 {
+            // is 106th bit set? this means we overflowed.
             // println!("Normalizing mantissa, shifting right");
-            // we need to shift right
             exponent += 1;
             mantissa_full >>= 1;
+        } else {
+            // this case only happens when subnormals are involved, since min normal mantissa is 2^52 and 2^52 * 2^52 = 2^104, which has the 105th bit set.
+            // todo: handle upper case by using leading zeros too?
+            let leading_zeros = mantissa_full.leading_zeros();
+            let wanted_leading_zeros = 128 - 105; // we want the 105th bit to be set, so we want 128-105 leading zeros
+            let shift_amt = leading_zeros - wanted_leading_zeros; // not negative because we handled that case above
+            mantissa_full <<= shift_amt; // fairly sure this is only needed for subnormals
+            exponent -= shift_amt as i16;
         }
 
-        // todo: handle upper case by using leading zeros too.
-        let leading_zeros = mantissa_full.leading_zeros();
-        let wanted_leading_zeros = 128 - 105; // we want the 105th bit to be set, so we want 128-105 leading zeros
-        let shift_amt = leading_zeros - wanted_leading_zeros; // not negative because we handled that case above
-        mantissa_full <<= shift_amt; // fairly sure this is only needed for subnormals
-        exponent -= shift_amt as i16;
-
         let shift_and_round = |mantissa_full: u128, shift: u32| -> u64 {
-            let mantissa = mantissa_full >> shift; // shift down to get 53 bits (including implicit leading 1)
-            let mantissa_lower = mantissa_full & ((1 << shift) - 1);
-            if mantissa_lower == (1 << (shift - 1)) { // tie, so round to even case.
-                if mantissa & 1 == 1 {
-                    (mantissa + 1) as u64 // round up to make even
-                } else {
-                    mantissa as u64 // truncate, so do nothing
-                }
-            } else if mantissa_lower > (1 << (shift - 1)) {
-                (mantissa + 1) as u64 // round up
+            let mantissa = (mantissa_full >> shift) as u64;
+            let remainder = mantissa_full & ((1u128 << shift) - 1);
+            let half_way = 1u128 << (shift - 1);
+
+            if remainder > half_way || (remainder == half_way && mantissa & 1 == 1) {
+                // if past halfway or exactly halfway and mantissa is odd (add instead of subtract since other case rounds down.)
+                mantissa + 1
             } else {
-                mantissa as u64 // truncate, so do nothing
+                // round down (truncate)
+                mantissa
             }
         };
 
@@ -179,7 +183,8 @@ impl Float {
 
         if exponent <= -1023 {
             // can we create a subnormal number?
-            if exponent < -1075 { // min subnormal is 2^-52 * 2^-1022 = 2^-1074. we still allow exponent -1075 because we might round up to that value
+            if exponent < -1075 {
+                // min subnormal is 2^-52 * 2^-1022 = 2^-1074. we still allow exponent -1075 because we might round up to that value
                 // underflow to zero
                 return Float::from_bits((sign as u64) << 63); // zero
             }
@@ -195,7 +200,12 @@ impl Float {
     }
 
     fn print_parts(&self) {
-        println!("Sign: {}, Exponent: {}, Mantissa: {:052b}", self.get_sign(), self.get_exponent(), self.get_mantissa());
+        println!(
+            "Sign: {}, Exponent: {}, Mantissa: {:052b}",
+            self.get_sign(),
+            self.get_exponent(),
+            self.get_mantissa()
+        );
     }
 }
 
@@ -224,7 +234,6 @@ fn mult_check_print(a: Float, b: Float, print: bool) {
         println!("x: {}, y: {}", a.to_f64(), b.to_f64());
         println!("expected: {:e}, actual: {:e}", expected, actual);
     }
-    
 }
 
 fn mult_stress_test() {
@@ -238,14 +247,13 @@ fn mult_stress_test() {
     println!("Stress test passed!");
 }
 
-
 fn main() {
     let a = Float::new(0.00);
     // let a = Float::new(-1.02735137937997933477e+00);
     println!("{:?}", a.to_f64());
     a.print_parts();
     a.print_bits();
-    let b = Float::new(0.00);
+    let b = Float::new(0.1);
     // let b = Float::new(-1.02735137937997933477e+00);
     println!("{:?}", b.to_f64());
     b.print_parts();
@@ -270,8 +278,8 @@ fn mult_tie_test() {
     // mantissa1 = 2^26, mantissa2 = 2^26 + 2^25, product = 2^52 + 2^51
     let mantissa1 = 1 << 26; // 2^26
     let mantissa2 = (1 << 26) + (1 << 25); // 2^26 + 2^25
-    // let mantissa2 = 1 << 25;
-    
+                                           // let mantissa2 = 1 << 25;
+
     let a = Float::from_parts(false, 0, mantissa1);
     let b = Float::from_parts(false, 0, mantissa2);
 
@@ -279,7 +287,7 @@ fn mult_tie_test() {
 
     // a.print_parts();
     // b.print_parts();
-    
+
     // let result = a.multiply(&b);
     // println!("Result = {:.17e}", result.to_f64());
     // result.print_parts();
