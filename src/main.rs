@@ -25,7 +25,6 @@ impl Float {
     fn get_exponent(&self) -> i16 {
         let exp_bits = ((self.bits >> 52) & ((1 << 11) - 1)) as i16;
         exp_bits - 1023 // Subtracting the bias
-                        // exp_bits
     }
 
     fn get_mantissa(&self) -> u64 {
@@ -127,13 +126,18 @@ impl Float {
         let mut mantissa_full = {
             // mutable because closure borrows exponent mutably
             let mut get_full_mantissa = |f: &Float| -> u64 {
-                if f.get_exponent() == -1023 {
-                    // subnormal
-                    exponent += 1; // adjust exponent for subnormal (interpreted as -1022)
-                    f.get_mantissa()
-                } else {
-                    f.get_mantissa() | (1 << 52) // implicit leading 1
-                }
+                // if f.get_exponent() == -1023 {
+                //     // subnormal
+                //     exponent += 1; // adjust exponent for subnormal (interpreted as -1022)
+                //     f.get_mantissa()
+                // } else {
+                //     f.get_mantissa() | (1 << 52) // implicit leading 1
+                // }
+
+                // branchless version. should profile to see if this is actually faster.
+                let is_normal = (((f.bits >> 52) & ((1 << 11) - 1)) != 0) as u64; // exponent bits non-zero
+                exponent += 1 - is_normal as i16; // adjust exponent for subnormal (interpreted as -1022)
+                f.get_mantissa() | (is_normal << 52) // implicit leading 1
             };
             u128::from(get_full_mantissa(self)) * u128::from(get_full_mantissa(other))
             // 53 + 53 = 106 bits
@@ -153,10 +157,8 @@ impl Float {
         } else {
             // this case only happens when subnormals are involved, since min normal mantissa is 2^52 and 2^52 * 2^52 = 2^104, which has the 105th bit set.
             // todo: handle upper case by using leading zeros too?
-            let leading_zeros = mantissa_full.leading_zeros();
-            let wanted_leading_zeros = 128 - 105; // we want the 105th bit to be set, so we want 128-105 leading zeros
-            let shift_amt = leading_zeros - wanted_leading_zeros; // not negative because we handled that case above
-            mantissa_full <<= shift_amt; // fairly sure this is only needed for subnormals
+            let shift_amt = mantissa_full.leading_zeros() - (128 - 105); // this will never be negative since we handled that case above. we want 23 leading zeros.
+            mantissa_full <<= shift_amt;
             exponent -= shift_amt as i16;
         }
 
