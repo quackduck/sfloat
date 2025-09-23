@@ -90,7 +90,7 @@ impl Float {
     //     float::from_bits(0x0000000000000001) // smallest subnormal number
     // }
 
-    fn multiply(&self, other: &Float) -> Float {
+    fn nan_logic(&self, other: &Float) -> Option<Float> {
         // this nan logic is not super important but matches apple's cpu behavior
         // the rule is that signaling nans take precedence over quiet nans,
         // that if both are the same type the first operand takes precedence,
@@ -109,7 +109,21 @@ impl Float {
             } else {
                 other.bits
             };
-            return Float::from_bits(chosen_nan | 1 << 51); // quiet nan
+            return Some(Float::from_bits(chosen_nan | 1 << 51)); // quiet nan
+        }
+        None
+    }
+
+    // returns mantissa with implicit leading 1 and adjusts exponent for subnormals
+    fn get_full_mantissa(&self, exponent: &mut i16) -> u64 {
+        let is_normal = (((self.bits >> 52) & ((1 << 11) - 1)) != 0) as u64; // exponent bits non-zero
+        *exponent += 1 - is_normal as i16; // adjust exponent for subnormal (interpreted as -1022)
+        self.get_mantissa() | (is_normal << 52) // implicit leading 1
+    }
+
+    fn multiply(&self, other: &Float) -> Float {
+        if let Some(nan) = self.nan_logic(other) {
+            return nan;
         }
 
         let sign = self.get_sign() ^ other.get_sign(); // same sign means pos, else neg
@@ -123,27 +137,7 @@ impl Float {
 
         let mut exponent = self.get_exponent() + other.get_exponent();
 
-        let mut mantissa_full = {
-            // mutable because closure borrows exponent mutably
-            let mut get_full_mantissa = |f: &Float| -> u64 {
-                // if f.get_exponent() == -1023 {
-                //     // subnormal
-                //     exponent += 1; // adjust exponent for subnormal (interpreted as -1022)
-                //     f.get_mantissa()
-                // } else {
-                //     f.get_mantissa() | (1 << 52) // implicit leading 1
-                // }
-
-                // branchless version. should profile to see if this is actually faster.
-                let is_normal = (((f.bits >> 52) & ((1 << 11) - 1)) != 0) as u64; // exponent bits non-zero
-                exponent += 1 - is_normal as i16; // adjust exponent for subnormal (interpreted as -1022)
-                f.get_mantissa() | (is_normal << 52) // implicit leading 1
-            };
-            u128::from(get_full_mantissa(self)) * u128::from(get_full_mantissa(other))
-            // 53 + 53 = 106 bits
-        };
-
-        // todo: consider approach where subnormals are normalized first.
+        let mut mantissa_full = u128::from(self.get_full_mantissa(&mut exponent)) * u128::from(other.get_full_mantissa(&mut exponent)); // 53 + 53 = 106 bits
 
         // println!("Mantissa full: {:0106b}", mantissa_full);
 
@@ -153,7 +147,7 @@ impl Float {
             // is 106th bit set? this means we overflowed.
             // println!("Normalizing mantissa, shifting right");
             exponent += 1;
-            mantissa_full >>= 1;
+            mantissa_full >>= 1; // todo: technically this could affect rounding??
         } else {
             // this case only happens when subnormals are involved, since min normal mantissa is 2^52 and 2^52 * 2^52 = 2^104, which has the 105th bit set.
             // todo: handle upper case by using leading zeros too?
@@ -176,9 +170,8 @@ impl Float {
             }
         };
 
-        if exponent >= 1024 {
-            // overflow to infinity
-            return Float::from_bits((sign as u64) << 63 | (0x7FF << 52)); // infinity
+        if exponent >= 1024 { // overflow to infinity
+            return Float::infinity(sign);
         }
 
         let mut shift = 52; // we want to shift right by 52 to get 53 bits (including implicit leading 1). another way to think of this is that when we multiplied the mantissas we did an implicit mult by 2^52.
@@ -196,6 +189,117 @@ impl Float {
         // from parts selects the lower 52 bits of the mantissa for us.
         Float::from_parts(sign, exponent, shift_and_round(mantissa_full, shift) as u64)
     }
+
+    fn add(&self, other: &Float) -> Float {
+        if let Some(nan) = self.nan_logic(other) {
+            return nan;
+        }
+
+        if self.is_zero() {
+            return other.copy();
+        }
+        if other.is_zero() {
+            return self.copy();
+        }
+        if self.is_infinity() {
+            if other.is_infinity() {
+                if self.get_sign() != other.get_sign() {
+                    return Float::nan(); // infinity + -infinity = nan
+                }
+            }
+            return self.copy();
+        }
+        if other.is_infinity() {
+            return other.copy();
+        }
+        
+        // both are finite and non-zero
+
+        let (mut a, mut b) = if self.get_exponent() > other.get_exponent() {
+            (self.copy(), other.copy())
+        } else {
+            (other.copy(), self.copy())
+        }; // a has the larger exponent
+        let mut exp_a = a.get_exponent();
+        let mut exp_b = b.get_exponent();
+
+        let sign = a.get_sign(); // sign of the result is the sign of the larger exponent
+        let mut mantissa_a = a.get_full_mantissa(&mut exp_a);
+        let mut mantissa_b = b.get_full_mantissa(&mut exp_b);
+
+        let exp_diff = (exp_a - exp_b) as u32;
+
+        // todo: think about signs and rounding.
+
+        let shifted_out = mantissa_b & ((1 << exp_diff) - 1); // for rounding
+
+        mantissa_b = if exp_diff >= 64 { // we could choose a smaller number such as 54 here since each mantissa is at most 53 bits.
+            0
+        } else {
+            mantissa_b >> exp_diff
+        };
+
+        let mantissa = mantissa_a + mantissa_b; // 53 + 53 = 54 bits
+
+        // Float::from_parts(sign, exponent, mantissa_a + mantissa_b)
+        return Float::nan(); // todo
+    }
+
+            // if exp_diff != 0 {
+        //     if exp_diff > 53 { // each mantissa is at most 53 bits.
+        //         // mantissa_b will be shifted out completely
+        //         mantissa_b = 0; // todo: think about rounding
+        //     } else {
+        //         // shift right with jamming
+                // if shifted_out != 0 {
+        //     mantissa_b |= 1; // jam bit
+        // }
+            // }
+        // }
+
+    // fn divide(&self, other: &Float) -> Float {
+    //     if let Some(nan) = self.nan_logic(other) {
+    //         return nan;
+    //     }
+    //     // division by zero and zero divided by zero both yield NaN
+    //     if other.is_zero() {
+    //         return Float::nan();
+    //     }
+        
+    //     let sign = self.get_sign() ^ other.get_sign(); // same sign means pos, else neg
+        
+    //     if self.is_zero() {
+    //         return Float::from_bits((sign as u64) << 63); // zero
+    //     }
+    //     if self.is_infinity() {
+    //         if other.is_infinity() {
+    //             return Float::nan(); // infinity / infinity = nan
+    //         }
+    //         return Float::infinity(sign); // infinity / finite = infinity
+    //     }
+    //     if other.is_infinity() {
+    //         return Float::from_bits((sign as u64) << 63); // finite / infinity = 0
+    //     }
+
+    //     let mut exponent = self.get_exponent() - other.get_exponent();
+    //     let mut mantissa_full = {
+    //         // mutable because closure borrows exponent mutably
+    //         let mut get_full_mantissa = |f: &Float| -> u64 {
+    //             // branchless version. should profile to see if this is actually faster.
+    //             let is_normal = (((f.bits >> 52) & ((1 << 11) - 1)) != 0) as u64; // exponent bits non-zero
+    //             exponent += 1 - is_normal as i16; // adjust exponent for subnormal (interpreted as -1022)
+    //             f.get_mantissa() | (is_normal << 52) // implicit leading 1
+    //         };
+    //         (u128::from(get_full_mantissa(self)) << 52) / u128::from(get_full_mantissa(other))
+    //         // shift by 52 to keep precision.
+    //     };
+    //     println!("Mantissa full: {:0106b}", mantissa_full);
+    //     // if-else block normalizes mantissa_full so that the 105th bit is set.
+
+    //     // todo: think about rounding.
+        
+    //     return Float::from_parts(sign, exponent, mantissa_full as u64); // todo
+    // }
 
     fn print_bits(&self) {
         println!("{:064b}", self.bits);
@@ -250,29 +354,66 @@ fn mult_stress_test() {
 }
 
 fn main() {
-    let a = Float::new(0.00);
+    let a = Float::new(1.1);
     // let a = Float::new(-1.02735137937997933477e+00);
     println!("{:?}", a.to_f64());
     a.print_parts();
     a.print_bits();
-    let b = Float::new(0.1);
+    let b = Float::new(1.1);
     // let b = Float::new(-1.02735137937997933477e+00);
     println!("{:?}", b.to_f64());
     b.print_parts();
     b.print_bits();
 
     let c = a.multiply(&b);
-
-    b.print_parts();
-    c.print_parts();
     println!("{:?}", c.to_f64());
+    c.print_parts();
+    c.print_bits();
 
-    let expected = a.to_f64() * b.to_f64();
-    println!("Expected: {:?}", expected);
-    Float::new(expected).print_parts();
+    // b.print_parts();
+    // c.print_parts();
+    // println!("{:?}", c.to_f64());
 
-    mult_stress_test();
-    mult_tie_test();
+    // let expected = a.to_f64() * b.to_f64();
+    // println!("Expected: {:?}", expected);
+    // Float::new(expected).print_parts();
+
+    // mult_stress_test();
+    mult_benchmark();
+    // mult_tie_test();
+
+    // let c = a.divide(&b);
+}
+
+fn mult_benchmark() {
+
+    let n = 100_000_000;
+
+    use std::time::Instant;
+    // let a = Float::new(1.1);
+    // let b = Float::new(1.1);
+
+    // test with subnormals
+    let a = Float::from_parts(false, -1023, 1); // smallest subnormal
+    let b = Float::new(1.0);
+
+    let start = Instant::now();
+    for _ in 0..n {
+        let _ = a.multiply(&b);
+    }
+    let duration1 = start.elapsed();
+    println!("Time elapsed in multiplication: {:?}", duration1);
+
+    let a_f = a.to_f64();
+    let b_f = b.to_f64();
+    let start = Instant::now();
+    for _ in 0..n {
+        let _ = a_f * b_f;
+    }
+    let duration2 = start.elapsed();
+    println!("Time elapsed in f64 multiplication: {:?}", duration2);
+
+    println!("Software is {} times slower", duration1.as_secs_f64() / duration2.as_secs_f64());
 }
 
 fn mult_tie_test() {
